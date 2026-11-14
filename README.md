@@ -52,3 +52,7 @@ the lab cannot test public ports, ACME or a real RPKI sync.
   `testing` mode. Tighten both once the deployment has run cleanly for a while.
 - Outbound DANE needs a DNSSEC-validating resolver on the host; none is
   shipped here.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).

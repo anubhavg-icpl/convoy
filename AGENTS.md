@@ -10,7 +10,7 @@ from `.env`; there is no application code.
 
 | Command | What it does |
 |---|---|
-| `./convoy check` | The gate. Builds everything, boots the offline lab, runs `lab/test.sh`, tears down. Needs only Docker. |
+| `./convoy check` | The gate (CI runs it too: `.github/workflows/check.yml`). Builds everything, boots the offline lab, runs `lab/test.sh`, tears down. Needs only Docker. |
 | `./convoy lab <compose args>` | Poke at the lab: `./convoy lab up -d --build`, `./convoy lab logs bird`, `sh lab/test.sh` |
 | `./convoy up` | Production stack (needs `.env`, copy from `env.example`) |
 | `./convoy ds` | Print the DS record for the registrar |
