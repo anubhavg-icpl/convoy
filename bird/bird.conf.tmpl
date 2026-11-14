@@ -1,0 +1,68 @@
+# BIRD 2 config for a single-prefix, IPv6-only hobby AS. Rendered by envsubst
+# at container start (ROUTER_ID, ASN, PREFIX, RTR_HOST).
+#
+# Invariants:
+#  - Every session exports ONLY the own prefix (export_own). That is the whole
+#    leak-prevention story; never give a session a looser export.
+#  - Peer and route-server imports drop RPKI-invalid origins (rpki_checked).
+#    Transit imports are left unfiltered on purpose.
+#  - Sessions live in peers.conf (bind-mounted), not here.
+
+router id ${ROUTER_ID};
+log stderr all;
+
+define OWN_AS = ${ASN};
+define OWN_PREFIX = ${PREFIX};
+
+protocol device {}
+
+protocol kernel {
+  ipv6 { import none; export where source = RTS_BGP; };
+}
+
+# An export filter alone originates nothing: BGP needs a route to announce.
+protocol static originate {
+  ipv6;
+  route OWN_PREFIX blackhole;
+}
+
+roa6 table r6;
+
+protocol rpki rpki1 {
+  roa6 { table r6; };
+  remote "${RTR_HOST}" port 3323;
+  retry keep 90;
+  refresh keep 900;
+  expire keep 172800;
+}
+
+filter rpki_checked {
+  # Literal, not OWN_PREFIX: BIRD rejects a prefix constant inside a set.
+  if net ~ [ ${PREFIX}+ ] then reject; # nobody announces our space back to us
+  if roa_check(r6, net, bgp_path.last_nonaggregated) = ROA_INVALID then reject;
+  accept;
+}
+
+filter export_own {
+  if net = OWN_PREFIX && source = RTS_STATIC then accept;
+  reject;
+}
+
+template bgp transit {
+  local as OWN_AS;
+  ipv6 { import all; export filter export_own; };
+}
+
+template bgp peer {
+  local as OWN_AS;
+  ipv6 {
+    # import table: keeps the pre-filter routes so BIRD re-runs rpki_checked by
+    # itself when ROAs change. Without it, routes that arrive before the RTR
+    # session is up (every restart) are judged "unknown" and never re-checked.
+    import table on;
+    import filter rpki_checked;
+    export filter export_own;
+  };
+}
+
+include "/etc/bird/peers.conf";
