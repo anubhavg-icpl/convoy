@@ -1,0 +1,38 @@
+#!/bin/sh -e
+# convoy task runner (plain sh: nothing to install on a fresh VPS).
+# `./convoy check` is the one gate: it boots the offline lab (compose.lab.yaml
+# with env.example values) and runs lab/test.sh against it.
+cd "$(dirname "$0")"
+lab() { docker compose --env-file env.example -p convoy-lab -f compose.yaml -f compose.lab.yaml "$@"; }
+
+case "${1:-}" in
+check) # build, boot the lab, test it, always tear it down (volumes included)
+  trap 'lab down -v' EXIT
+  lab up -d --build
+  sh lab/test.sh
+  ;;
+lab) # pass-through for poking at the lab: ./convoy lab ps | ./convoy lab logs bird
+  shift; lab "$@" ;;
+up) # production stack (needs .env)
+  docker compose up -d --build ;;
+ds) # DS record to hand to the registrar
+  docker compose logs dns | grep -A1 'DS record' ;;
+cert) # first Let's Encrypt cert, HTTP-01 through the running web container.
+  # The deploy hook is stored in the renewal config, so `renew` reuses it.
+  . ./.env
+  docker compose run --rm certbot certonly --webroot -w /var/www/acme \
+    -d "$DOMAIN" -d "mail.$DOMAIN" -d "ns1.$DOMAIN" -d "ntp.$DOMAIN" -d "mta-sts.$DOMAIN" \
+    --key-type ecdsa --elliptic-curve secp384r1 -m "$ACME_EMAIL" --agree-tos -n \
+    --deploy-hook 'cp -L $RENEWED_LINEAGE/fullchain.pem $RENEWED_LINEAGE/privkey.pem /certs/'
+  "$0" reload-certs
+  ;;
+renew) # run from a host timer (weekly is plenty); no-op until the cert is due
+  docker compose run --rm certbot renew
+  "$0" reload-certs
+  ;;
+reload-certs) # every TLS consumer re-reads the cert; dns also re-signs (new TLSA)
+  docker compose restart dns web postfix dovecot ntp ;;
+*)
+  echo "usage: $0 check | lab <compose args> | up | ds | cert | renew | reload-certs" >&2
+  exit 2 ;;
+esac
