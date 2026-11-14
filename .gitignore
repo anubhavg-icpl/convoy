@@ -1,0 +1,5 @@
+.env
+# agent tooling state, not part of the stack
+.claude/
+.claude-flow/
+.swarm/
