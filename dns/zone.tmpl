@@ -1,0 +1,26 @@
+; Hand-edited zone. ${DOMAIN}, ${IPV4}, ${IPV6} are filled in by resign.sh.
+; Do NOT add TLSA or DKIM records here: resign.sh derives them from the live
+; cert and key. The SOA serial is overwritten at signing time (ldns-signzone -u).
+; After editing: docker compose exec dns resign.sh
+$ORIGIN ${DOMAIN}.
+$TTL 3600
+@         IN SOA   ns1 hostmaster 1 86400 7200 3600000 3600
+@         IN NS    ns1
+@         IN A     ${IPV4}
+@         IN AAAA  ${IPV6}
+@         IN MX    10 mail
+@         IN TXT   "v=spf1 ip4:${IPV4} ip6:${IPV6} -all"
+@         IN CAA   0 issue "letsencrypt.org"
+@         IN HTTPS 1 . alpn="h3,h2" ipv4hint=${IPV4} ipv6hint=${IPV6}
+ns1       IN A     ${IPV4}
+ns1       IN AAAA  ${IPV6}
+mail      IN A     ${IPV4}
+mail      IN AAAA  ${IPV6}
+ntp       IN A     ${IPV4}
+ntp       IN AAAA  ${IPV6}
+mta-sts   IN A     ${IPV4}
+mta-sts   IN AAAA  ${IPV6}
+_dmarc    IN TXT   "v=DMARC1; p=quarantine; rua=mailto:me@${DOMAIN}"
+; Bump id whenever the policy served by web/ changes.
+_mta-sts  IN TXT   "v=STSv1; id=1"
+_smtp._tls IN TXT  "v=TLSRPTv1; rua=mailto:me@${DOMAIN}"
