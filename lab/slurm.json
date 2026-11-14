@@ -1,0 +1,11 @@
+{
+  "slurmVersion": 1,
+  "validationOutputFilters": { "prefixFilters": [], "bgpsecFilters": [] },
+  "locallyAddedAssertions": {
+    "prefixAssertions": [
+      { "asn": 64497, "prefix": "2001:db8:100::/48", "maxPrefixLength": 48 },
+      { "asn": 64499, "prefix": "2001:db8:200::/48", "maxPrefixLength": 48 }
+    ],
+    "bgpsecAssertions": []
+  }
+}
