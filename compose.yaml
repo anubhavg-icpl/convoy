@@ -1,0 +1,157 @@
+# convoy: one-box hobby-AS service stack (BGP + ROV, DNS, NTP/NTS, mail, web).
+#
+# Invariants:
+#  - Every TLS consumer reads the SAME cert from the `certs` volume
+#    (/certs/fullchain.pem + privkey.pem). `certs` seeds a self-signed one so the
+#    stack boots before ACME; `just cert` replaces it. dns derives TLSA from it,
+#    so after any cert change run `just reload-certs`.
+#  - bird and ntp use the host network: bird needs the real interfaces, and NTP
+#    pool traffic through Docker's conntrack NAT drops packets under load.
+#  - compose.lab.yaml overrides this file for the offline test lab; keep service
+#    names in sync with it and with lab/test.sh.
+name: convoy
+
+services:
+  # One-shot: self-signed ECDSA P-384 bootstrap cert, only if none exists yet.
+  certs:
+    build: ./dns
+    restart: "no"
+    environment: { DOMAIN: "${DOMAIN:?set DOMAIN in .env}" }
+    volumes: [certs:/certs]
+    command:
+      - sh
+      - -c
+      - >
+        [ -s /certs/fullchain.pem ] ||
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -nodes -days 30
+        -keyout /certs/privkey.pem -out /certs/fullchain.pem -subj "/CN=$$DOMAIN"
+        -addext "subjectAltName=DNS:$$DOMAIN,DNS:mail.$$DOMAIN,DNS:ns1.$$DOMAIN,DNS:ntp.$$DOMAIN,DNS:mta-sts.$$DOMAIN"
+
+  # RPKI validator, stripped down: RTR only, no HTTP UI, 6h refresh, 2 threads.
+  # First run downloads the whole RPKI (minutes, ~1-2 GB RAM peak).
+  routinator:
+    image: nlnetlabs/routinator:v0.16.1
+    restart: unless-stopped
+    command: [--validation-threads, "2", server, --rtr, "0.0.0.0:3323", --refresh, "21600"]
+    ports: ["127.0.0.1:3323:3323"]
+    volumes: [rpki:/home/routinator/.rpki-cache]
+
+  bird:
+    build: ./bird
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_BIND_SERVICE, NET_RAW]
+    environment:
+      ASN: "${ASN}"
+      PREFIX: "${PREFIX}"
+      ROUTER_ID: "${ROUTER_ID}"
+      RTR_HOST: 127.0.0.1 # routinator's published port, seen from the host netns
+    volumes: [./bird/peers.conf:/etc/bird/peers.conf:ro]
+    depends_on: [routinator]
+
+  dns:
+    build: ./dns
+    restart: unless-stopped
+    environment:
+      DOMAIN: "${DOMAIN}"
+      IPV4: "${IPV4}"
+      IPV6: "${IPV6}"
+      SECONDARY_IP: "${SECONDARY_IP:-}"
+    # Bound to the public addresses only: 0.0.0.0:53 collides with the host's
+    # stub resolver (systemd-resolved on 127.0.0.53).
+    ports:
+      - "${IPV4}:53:53/udp"
+      - "${IPV4}:53:53/tcp"
+      - "${IPV4}:853:853/tcp"
+      - "[${IPV6}]:53:53/udp"
+      - "[${IPV6}]:53:53/tcp"
+      - "[${IPV6}]:853:853/tcp"
+    volumes:
+      - dnsdata:/data
+      - certs:/certs:ro
+      - dkim:/dkim:ro
+      - ./dns/zone.tmpl:/etc/nsd/zone.tmpl:ro
+    depends_on:
+      certs: { condition: service_completed_successfully }
+      opendkim: { condition: service_healthy } # zone publishes its DKIM key
+
+  ntp:
+    build: ./ntp
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [SYS_TIME, NET_BIND_SERVICE]
+    volumes: [certs:/certs:ro, ntpdata:/var/lib/chrony]
+    depends_on:
+      certs: { condition: service_completed_successfully }
+
+  opendkim:
+    build: ./mail
+    restart: unless-stopped
+    command: [opendkim]
+    environment: { DOMAIN: "${DOMAIN}" }
+    volumes: [dkim:/dkim]
+    healthcheck:
+      test: [CMD, test, -s, /dkim/mail.txt]
+      interval: 2s
+      retries: 30
+
+  postfix:
+    build: ./mail
+    restart: unless-stopped
+    command: [postfix]
+    hostname: mail
+    environment: { DOMAIN: "${DOMAIN}" }
+    ports: ["25:25"]
+    volumes: [certs:/certs:ro, maildata:/var/mail/vhosts, mailqueue:/var/spool/postfix]
+    depends_on:
+      certs: { condition: service_completed_successfully }
+      opendkim: { condition: service_healthy }
+
+  # IMAPS on localhost only: read mail over an SSH tunnel, or `just mutt`-style
+  # with `docker compose exec`.
+  dovecot:
+    build: ./mail
+    restart: unless-stopped
+    command: [dovecot]
+    environment:
+      DOMAIN: "${DOMAIN}"
+      MAIL_PASSWORD: "${MAIL_PASSWORD:?set MAIL_PASSWORD in .env}"
+    ports: ["127.0.0.1:993:993"]
+    volumes: [certs:/certs:ro, maildata:/var/mail/vhosts]
+    depends_on:
+      certs: { condition: service_completed_successfully }
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    environment: { DOMAIN: "${DOMAIN}" }
+    ports: ["80:80", "443:443", "443:443/udp"] # udp = HTTP/3
+    volumes:
+      - certs:/certs:ro
+      - acme:/var/www/acme:ro
+      - ./web/site:/var/www/site:ro
+    depends_on:
+      certs: { condition: service_completed_successfully }
+
+  # Only runs via `just cert` / `just renew` (profile-gated).
+  certbot:
+    image: certbot/certbot:v5.9.0
+    profiles: [acme]
+    volumes: [letsencrypt:/etc/letsencrypt, acme:/var/www/acme, certs:/certs]
+
+volumes:
+  certs:
+  rpki:
+  dnsdata:
+  dkim:
+  ntpdata:
+  maildata:
+  mailqueue:
+  acme:
+  letsencrypt:
+
+networks:
+  default:
+    enable_ipv6: true # NAT66 keeps real v6 client addresses on published ports
