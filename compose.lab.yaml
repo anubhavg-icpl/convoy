@@ -1,0 +1,72 @@
+# Offline lab: the same images on one private bridge, nothing published to the
+# host, no host networking, no clock control. Used only by `./convoy check`.
+#
+# Adds what production gets from the real world:
+#   peer        a second BIRD (AS64497) announcing a valid, an invalid and an
+#               unknown-origin prefix
+#   routinator  serves lab/slurm.json instead of the real RPKI (no RIR TALs),
+#               so ROV is deterministic and needs no multi-GB download
+#   probe       client tools for lab/test.sh
+# Network aliases stand in for DNS so the bootstrap cert's names verify.
+services:
+  routinator:
+    command: !override [--no-rir-tals, --exceptions, /slurm.json, server, --rtr, "[::]:3323"]
+    # [::] because the lab resolves `routinator` to IPv6 first and BIRD only
+    # tries the first address.
+    ports: !reset []
+    volumes: !override [./lab/slurm.json:/slurm.json:ro]
+
+  bird:
+    network_mode: !reset null
+    networks: { default: { ipv6_address: "fd00:179::b:1" } }
+    environment: { RTR_HOST: routinator }
+    volumes: !override [./lab/peers.conf:/etc/bird/peers.conf:ro]
+
+  peer:
+    build: ./bird
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_BIND_SERVICE, NET_RAW]
+    networks: { default: { ipv6_address: "fd00:179::b:2" } }
+    volumes: [./lab/peer.conf:/lab/peer.conf:ro]
+    command: [sh, -c, "mkdir -p /run/bird && exec bird -f -c /lab/peer.conf"]
+
+  dns:
+    ports: !reset []
+    networks: { default: { aliases: ["ns1.${DOMAIN}"] } }
+
+  ntp:
+    network_mode: !reset null
+    cap_add: !override [NET_BIND_SERVICE]
+    # -x: never touch the (host-shared) clock from the lab.
+    # local: serve the container's own clock, so the lab needs no upstream.
+    command: [chronyd, -d, -u, root, -x, "include /etc/chrony/chrony.conf", "local stratum 10"]
+    networks: { default: { aliases: ["ntp.${DOMAIN}"] } }
+
+  postfix:
+    ports: !reset []
+    networks: { default: { aliases: ["mail.${DOMAIN}"] } }
+
+  dovecot:
+    ports: !reset []
+
+  web:
+    ports: !reset []
+    networks: { default: { aliases: ["${DOMAIN}", "mta-sts.${DOMAIN}"] } }
+
+  probe:
+    build:
+      dockerfile_inline: |
+        FROM debian:trixie-slim
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+            curl knot-dnsutils chrony swaks openssl ca-certificates libnet-ssleay-perl \
+         && rm -rf /var/lib/apt/lists/*
+    command: [sleep, infinity]
+    volumes: [certs:/certs:ro]
+
+networks:
+  default:
+    ipam:
+      config:
+        # bird/peer sit at ::b:1 and ::b:2, clear of the low addresses Docker
+        # hands out dynamically (a static ::2 collided with another container).
+        - subnet: fd00:179::/64
